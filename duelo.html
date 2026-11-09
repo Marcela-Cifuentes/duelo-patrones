@@ -1,0 +1,124 @@
+<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Duelo de patrones</title><link rel="stylesheet" href="duelo.css"><script src="firebase-config.js"></script></head>
+<body><div class="bar"></div><div class="wrap" id="app"></div>
+<script type="module">
+import {initDb} from './db.js';
+import {FILTERS,LAYERS,photoHTML,treeHTML,esc,confetti,rankList} from './shared.js';
+const $=s=>document.querySelector(s),app=$('#app');
+const db=await initDb(),me=db.uid;
+let code=(new URLSearchParams(location.search).get('sala')||localStorage.getItem('duelo_code')||'').toUpperCase();
+const S={state:null,pairs:{},cur:null,res:{},scores:{}};
+let lastKey=null,t0=0,getAns=()=>null,lastFb='',subbed=false;
+const base=()=>'rooms/'+code;
+const myName=()=>S.pairs[me]?.name||'Tu pareja';
+
+function joinView(err){
+  app.innerHTML=`<div class="card"><h2 class="hd" style="color:var(--c)">⚔️ Duelo de patrones</h2>
+  <p>Entren con su pareja. Gana puntos la pareja que acierte primero.</p>
+  <label>Código de sala</label><input class="t" id="c" maxlength="6" value="${esc(code)}" style="text-transform:uppercase">
+  <label>Nombre de la pareja</label><input class="t" id="n" maxlength="30" placeholder="Ej: Los Decoradores">
+  <label>Integrante 1</label><input class="t" id="m1" maxlength="30"><label>Integrante 2</label><input class="t" id="m2" maxlength="30">
+  <div class="msg bad" id="e">${esc(err||'')}</div><button class="btn" id="go">Entrar al duelo</button></div>`;
+  $('#go').onclick=async()=>{
+    const c=$('#c').value.trim().toUpperCase(),n=$('#n').value.trim(),m1=$('#m1').value.trim(),m2=$('#m2').value.trim();
+    if(!c||!n||!m1||!m2)return $('#e').textContent='Completa todos los campos.';
+    code=c;const st=await db.get(base()+'/state');
+    if(st==null)return $('#e').textContent='No encuentro esa sala. Revisa el código.';
+    await db.set(base()+'/pairs/'+me,{name:n,m1,m2,uid:me,at:db.ts()});
+    localStorage.setItem('duelo_code',code);subscribe();
+  };
+}
+function subscribe(){
+  if(subbed)return;subbed=true;
+  const w=(k,f)=>db.on(base()+'/'+k,v=>{f(v);refresh();});
+  w('state',v=>S.state=v);w('pairs',v=>S.pairs=v||{});w('cur',v=>S.cur=v);w('res',v=>S.res=v||{});w('scores',v=>S.scores=v||{});
+}
+function rival(){
+  const c=S.cur;if(!c||!c.duels)return '—';
+  for(const d of Object.values(c.duels)){
+    if(d.a===me)return d.b==='casa'?'La casa 🏠':(S.pairs[d.b]?.name||'?');
+    if(d.b===me)return S.pairs[d.a]?.name||'?';
+  }return 'Sin rival (mira la pantalla)';
+}
+function refresh(){
+  if(!subbed||S.state==null)return;
+  const c=S.cur,st=S.state;let key;
+  if(st==='end')key='end';
+  else if(c&&c.r!==undefined&&st==='play')key='r'+c.r+(c.open?'o':'c');
+  else key='lobby';
+  if(key!==lastKey||key==='lobby'||key==='end'){lastKey=key;build(key);}else update();
+}
+function build(key){
+  if(key==='lobby'){
+    const n=Object.keys(S.pairs).length;
+    app.innerHTML=`<div class="card tint" style="text-align:center"><h2 class="hd">⚔️ Sala ${esc(code)}</h2><p style="font-size:18px">¡Listos, <b>${esc(myName())}</b>!</p><div class="big">${n}</div><p>parejas conectadas</p><p>Esperando que la profe inicie el duelo…</p></div><div class="card">${rankList(S.pairs,S.scores,me)}</div>`;
+  }else if(key==='end'){
+    app.innerHTML=`<div class="card tint" style="text-align:center"><h2 class="hd">🏆 ¡Podio final!</h2><div style="margin-top:10px">${rankList(S.pairs,S.scores,me)}</div></div>`;confetti(90);
+  }else if(key.endsWith('o'))buildRound();
+  else buildResult();
+}
+function buildRound(){
+  const c=S.cur,d=JSON.parse(c.data);t0=Date.now();lastFb='';
+  app.innerHTML=`<div class="card tint"><div class="vs"><span class="chip">${esc(myName())}</span> ⚔️ <span class="chip">${esc(rival())}</span></div>
+  <div style="display:flex;justify-content:space-between;margin-top:8px"><b>Ronda ${c.r+1}: ${esc(c.title)}${c.mult>1?' · ¡PUNTOS x2!':''}</b><b id="tm"></b></div></div>
+  <div class="card"><p style="font-size:18px;font-weight:700;margin-top:0">${esc(c.prompt)}</p><div id="work"></div><div class="msg" id="msg"></div><button class="btn" id="send">Enviar respuesta</button></div>`;
+  B[c.type](d,$('#work'));
+  $('#send').onclick=send;update();
+}
+const msg=(t,k)=>{const m=$('#msg');if(m){m.textContent=t;m.className='msg '+(k||'');}};
+async function send(){
+  if(!S.cur?.open)return;
+  const a=getAns();if(a==null||a==='')return msg('Te falta completar la respuesta.','bad');
+  const b=$('#send');b.disabled=true;
+  await db.push(base()+'/answers/'+S.cur.r+'/'+me,{a:String(a),t:db.ts()});
+  msg('Enviado… la profe lo está revisando.');
+  setTimeout(()=>{if(!S.res?.[S.cur.r]?.[me]?.ok)b.disabled=false;},1200);
+}
+function update(){
+  const c=S.cur;if(!c||!c.open)return;
+  const mine=S.res?.[c.r]?.[me],fb=mine?(mine.ok?'ok':'no'+mine.n):'';
+  if(fb!==lastFb){lastFb=fb;
+    if(mine?.ok){msg('✅ ¡Correcto! Espera a que termine la ronda.','good');const b=$('#send');if(b)b.disabled=true;}
+    else if(mine?.n>0)msg('❌ Todavía no es. Revisa y vuelve a intentar (intentos: '+mine.n+').','bad');}
+}
+setInterval(()=>{const c=S.cur,t=$('#tm');if(!t||!c||!c.open)return;const r=Math.max(0,c.dur-Math.floor((Date.now()-t0)/1000));t.textContent='⏱ '+r+' s';t.style.color=r<=10?'#C4173F':'';},500);
+const B={
+ img(d,w){
+  let st=[];
+  w.innerHTML=`<div id="ph"></div><p style="margin:8px 0 2px"><b>Tu pila de filtros</b> (toca uno para quitarlo):</p><div id="st" class="pool"></div><p style="margin:8px 0 2px">Toca los filtros para agregarlos:</p><div id="pcs"></div>`;
+  const draw=()=>{$('#ph').innerHTML=photoHTML(st);
+    $('#st').innerHTML=st.length?st.map((k,i)=>`<span class="pc" data-r="${k}">${i+1}. ${esc(FILTERS[k].n.split(' (')[0])}</span>`).join(''):'<i style="color:#6F6468;padding:8px;display:block">Vacía: la foto está sin filtros</i>';
+    $('#pcs').innerHTML=d.pieces.filter(k=>!st.includes(k)).map(k=>`<span class="pc" data-a="${k}">${esc(FILTERS[k].n)}</span>`).join('');
+    w.querySelectorAll('[data-a]').forEach(e=>e.onclick=()=>{st.push(e.dataset.a);draw();});
+    w.querySelectorAll('[data-r]').forEach(e=>e.onclick=()=>{st=st.filter(x=>x!==e.dataset.r);draw();});};
+  draw();getAns=()=>st.length?st.join(','):null;
+ },
+ mus(d,w){
+  const on=new Set();
+  w.innerHTML=`<p style="margin-top:0">🔊 Escucha la música en el parlante del salón.</p>`+d.layers.map(k=>`<button class="opt" data-k="${k}">${esc(LAYERS[k])}</button>`).join('');
+  w.querySelectorAll('.opt').forEach(b=>b.onclick=()=>{on.has(b.dataset.k)?on.delete(b.dataset.k):on.add(b.dataset.k);b.classList.toggle('on');});
+  getAns=()=>on.size?[...on].sort().join(','):null;
+ },
+ tree(d,w){
+  w.innerHTML=treeHTML(d.tree,true)+`<label><b>Total en MB:</b></label><input class="t" id="num" type="number" inputmode="numeric" placeholder="Escribe un número">`;
+  getAns=()=>{const v=$('#num').value.trim();return v===''?null:String(Number(v));};
+ },
+ det(d,w){
+  const a=[null,null,null],L=[['D','Decorator'],['C','Composite'],['N','Ninguno']];
+  w.innerHTML=d.cases.map((t,i)=>`<div class="card tint" style="margin:8px 0"><b>${i+1})</b> ${esc(t)}<div style="display:flex;gap:6px;margin-top:8px">${L.map(([k,n])=>`<button class="opt" style="margin:0;text-align:center;padding:10px 4px" data-i="${i}" data-k="${k}">${n}</button>`).join('')}</div></div>`).join('');
+  w.querySelectorAll('.opt').forEach(b=>b.onclick=()=>{const i=+b.dataset.i;a[i]=b.dataset.k;w.querySelectorAll(`[data-i="${i}"]`).forEach(x=>x.classList.toggle('on',x===b));});
+  getAns=()=>a.every(Boolean)?a.join(''):null;
+ }};
+function buildResult(){
+  const c=S.cur,m=S.res?.[c.r]?.[me]||{},pts=m.pts||0;
+  const head=m.w?`🏆 ¡Ganaste el duelo! +${pts}`:m.ok?`👏 Acertaste, pero la otra pareja fue más rápida. +${pts}`:'😅 Esta vez no sumaste. ¡Vamos por la siguiente!';
+  app.innerHTML=`<div class="card tint" style="text-align:center"><h2 class="hd">${head}</h2><p>Duelo contra <b>${esc(rival())}</b></p></div>
+  <div class="card"><b>Respuesta correcta</b><p>${esc(c.sol||'')}</p></div><div class="card"><b>Ranking</b>${rankList(S.pairs,S.scores,me)}</div>`;
+  if(m.w)confetti();
+}
+(async()=>{
+  if(code){const mine=await db.get(base()+'/pairs/'+me),st=await db.get(base()+'/state');
+    if(mine&&st!=null){subscribe();return;}}
+  joinView();
+})();
+</script></body></html>

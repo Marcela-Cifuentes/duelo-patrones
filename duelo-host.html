@@ -1,0 +1,137 @@
+<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Duelo de patrones · Profe</title><link rel="stylesheet" href="duelo.css"><script src="firebase-config.js"></script>
+<style>.grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}@media(max-width:760px){.grid{grid-template-columns:1fr}}
+.code{font:800 64px Montserrat,Arial;letter-spacing:10px;color:var(--c)}table{width:100%;border-collapse:collapse}td{padding:6px 4px;border-bottom:1px solid #eee}</style></head>
+<body><div class="bar"></div><div class="wrap" id="app"></div>
+<script type="module">
+import {initDb} from './db.js';
+import {ROUNDS,FILTERS,LAYERS,makeChallenge,photoHTML,treeHTML,esc,confetti,rankList} from './shared.js';
+const $=s=>document.querySelector(s),app=$('#app');
+const db=await initDb(),me=db.uid;
+let code=localStorage.getItem('duelo_host_code')||'';
+const S={state:null,pairs:{},cur:null,res:{},scores:{},answers:{}};
+let subbed=false,lastKey=null,closing=false,written={},t0=0;
+const base=()=>'rooms/'+code;
+
+// ---------- música (Web Audio): melodía base + capas Decorator ----------
+let ac=null,loopT=null,playing=false;
+const NOTES=[262,330,392,330,294,349,440,349],STEP=.5;
+function tone(f,t,d,type,g,dest){const o=ac.createOscillator(),v=ac.createGain();o.type=type;o.frequency.value=f;v.gain.setValueAtTime(0,t);v.gain.linearRampToValueAtTime(g,t+.02);v.gain.exponentialRampToValueAtTime(.001,t+d);o.connect(v);v.connect(dest);o.start(t);o.stop(t+d+.05);}
+function stopMusic(){playing=false;clearTimeout(loopT);}
+function playLayers(layers){
+  stopMusic();ac=ac||new (window.AudioContext||window.webkitAudioContext)();ac.resume();playing=true;
+  const dry=ac.createGain();dry.connect(ac.destination);
+  let wet=dry;
+  if(layers.includes('eco')){const dl=ac.createDelay(1),fb=ac.createGain(),mix=ac.createGain();dl.delayTime.value=.3;fb.gain.value=.55;mix.gain.value=.8;wet=ac.createGain();wet.connect(dry);wet.connect(dl);dl.connect(fb);fb.connect(dl);dl.connect(mix);mix.connect(ac.destination);}
+  const loop=()=>{if(!playing)return;const t=ac.currentTime+.05;
+    NOTES.forEach((f,i)=>{const s=t+i*STEP;tone(f,s,.45,'sine',.2,wet);
+      if(layers.includes('grave'))tone(f/2,s,.5,'triangle',.3,wet);
+      if(layers.includes('agudo'))tone(f*2,s,.3,'sine',.12,wet);
+      if(layers.includes('rapido'))[1,1.25,1.5,1.25].forEach((m,k)=>tone(f*m,s+k*STEP/4,.1,'square',.045,wet));});
+    loopT=setTimeout(loop,NOTES.length*STEP*1000);};
+  loop();
+}
+window.playLayers=playLayers;window.stopMusic=stopMusic;
+const audioBtns=()=>`<div style="margin-top:6px"><button class="btn alt" onclick="playLayers([])">▶ Base</button> <button class="btn alt" onclick="playLayers(['grave'])">+ Grave</button> <button class="btn alt" onclick="playLayers(['rapido'])">+ Rápido</button> <button class="btn alt" onclick="playLayers(['agudo'])">+ Agudo</button> <button class="btn alt" onclick="playLayers(['eco'])">+ Eco</button> <button class="btn alt" onclick="stopMusic()">⏹</button></div>`;
+
+// ---------- sala ----------
+const rnd=()=>{const a='BCDFGHJKLMNPRSTVXZ';let s='';for(let i=0;i<4;i++)s+=a[Math.floor(Math.random()*a.length)];return s;};
+async function createRoom(){
+  let c;do{c=rnd();}while(await db.get('rooms/'+c+'/state')!=null);
+  code=c;localStorage.setItem('duelo_host_code',code);
+  await db.set(base(),{hostUid:me,state:'lobby',created:db.ts()});subscribe();
+}
+function subscribe(){
+  if(subbed)return;subbed=true;
+  const w=(k,f)=>db.on(base()+'/'+k,v=>{f(v);refresh();});
+  w('state',v=>S.state=v);w('pairs',v=>S.pairs=v||{});w('cur',v=>S.cur=v);w('res',v=>S.res=v||{});w('scores',v=>S.scores=v||{});
+  w('answers',v=>{S.answers=v||{};judge();});
+}
+const pids=()=>Object.keys(S.pairs);
+const nm=id=>id==='casa'?'La casa 🏠':(S.pairs[id]?.name||'?');
+function evalAll(){
+  const c=S.cur,out={};if(!c)return out;
+  const ch=makeChallenge(c.r,code),ans=S.answers?.[c.r]||{};
+  pids().forEach(pid=>{
+    const at=Object.values(ans[pid]||{}).sort((a,b)=>(a.t||0)-(b.t||0));
+    const ok=at.find(x=>x.a===ch.key);out[pid]={ok:!!ok,n:at.length,t:ok?ok.t:null};});
+  return out;
+}
+function judge(){
+  const c=S.cur;if(!c||!c.open||S.state!=='play')return;
+  const ev=evalAll();
+  Object.entries(ev).forEach(([pid,e])=>{const j=JSON.stringify(e);
+    if(written[c.r+pid]!==j){written[c.r+pid]=j;db.set(base()+'/res/'+c.r+'/'+pid,{ok:e.ok,n:e.n,t:e.t||null});}});
+  const ids=pids();if(ids.length&&ids.every(p=>ev[p].ok))setTimeout(closeRound,1500);
+}
+async function launch(r){
+  const ch=makeChallenge(r,code),R=ROUNDS[r],ids=pids().sort(()=>Math.random()-.5),duels={};
+  for(let i=0;i<ids.length;i+=2)duels['d'+i/2]={a:ids[i],b:ids[i+1]||'casa'};
+  closing=false;t0=Date.now();
+  await db.set(base()+'/cur',{r,type:R.type,title:R.title,prompt:ch.prompt,data:JSON.stringify(ch.pub),dur:R.dur,mult:R.mult,startedAt:db.ts(),open:true,reveal:false,duels});
+  await db.set(base()+'/state','play');
+  if(R.type==='mus')playLayers(ch.set);
+}
+async function closeRound(){
+  const c=S.cur;if(closing||!c||!c.open)return;closing=true;stopMusic();
+  const r=c.r,ev=evalAll(),pts={},win={};
+  Object.values(c.duels||{}).forEach(d=>{
+    const A=ev[d.a]||{},Bv=d.b==='casa'?{}:(ev[d.b]||{});
+    if(d.b==='casa'){if(A.ok){pts[d.a]=3;win[d.a]=1;}return;}
+    if(A.ok&&Bv.ok){const aw=(A.t||0)<=(Bv.t||0);pts[d.a]=aw?3:1;pts[d.b]=aw?1:3;win[aw?d.a:d.b]=1;}
+    else if(A.ok){pts[d.a]=3;win[d.a]=1;}else if(Bv.ok){pts[d.b]=3;win[d.b]=1;}});
+  const m=c.mult||1,upd={};
+  pids().forEach(pid=>{const e=ev[pid]||{};upd[pid]={ok:!!e.ok,n:e.n||0,t:e.t||null,pts:(pts[pid]||0)*m,w:!!win[pid],closed:true};});
+  await db.set(base()+'/res/'+r,upd);
+  await Promise.all(pids().map(pid=>{let tot=0;for(let k=0;k<ROUNDS.length;k++)tot+=k===r?upd[pid].pts:(S.res?.[k]?.[pid]?.pts||0);return db.set(base()+'/scores/'+pid,tot);}));
+  await db.set(base()+'/cur',{...c,open:false,reveal:true,sol:makeChallenge(r,code).solText});
+}
+async function endGame(){await db.set(base()+'/state','end');}
+window.H={create:createRoom,start:()=>launch(0),next:()=>{const r=S.cur.r+1;r<ROUNDS.length?launch(r):endGame();},close:closeRound,
+  reset:async()=>{localStorage.removeItem('duelo_host_code');location.reload();}};
+
+// ---------- vistas ----------
+function refresh(){
+  if(S.state==null&&subbed)return;
+  const c=S.cur,st=S.state;let key=!subbed?'setup':st==='end'?'end':(c&&st==='play')?'r'+c.r+(c.open?'o':'c'):'lobby';
+  if(key!==lastKey){lastKey=key;build(key);}
+  dyn(key);
+}
+function playerUrl(){const u=new URL('duelo.html',location.href);u.search='?sala='+code;return u.href;}
+function build(key){
+  if(key==='setup'){app.innerHTML=`<div class="card tint" style="text-align:center"><h1 class="hd">⚔️ Duelo de patrones</h1><p>Decorator y Composite · parejas contra parejas</p><button class="btn" onclick="H.create()">Crear sala</button></div>`;return;}
+  if(key==='lobby'){app.innerHTML=`<div class="grid"><div class="card tint" style="text-align:center"><h2 class="hd">Entren a la sala</h2><div class="code">${code}</div><p>${esc(playerUrl())}</p><img alt="QR" width="180" height="180" src="https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(playerUrl())}"></div>
+   <div class="card"><h2 class="hd">Parejas conectadas</h2><div id="d"></div><button class="btn" id="go" onclick="H.start()">¡Comenzar el duelo!</button><hr><b>Prueba de sonido (capas de la ronda 2)</b><p style="margin:4px 0">Cada capa es un Decorator sobre la melodía.</p>${audioBtns()}</div></div>`;return;}
+  if(key==='end'){app.innerHTML=`<div class="card tint" style="text-align:center"><h1 class="hd">🏆 ¡Podio final!</h1><div id="d" style="max-width:640px;margin:auto;text-align:left"></div><br><button class="btn alt" onclick="H.reset()">Nueva sala</button></div>`;confetti(120);return;}
+  const c=S.cur,d=JSON.parse(c.data),open=key.endsWith('o');
+  let work='';
+  if(c.type==='img')work=photoHTML([])+'<p style="text-align:center"><b>Filtros:</b> '+d.pieces.map(k=>FILTERS[k].n).join(' · ')+'</p>';
+  else if(c.type==='mus')work='<p style="font-size:20px;text-align:center">🔊 Escuchen con atención</p>'+audioBtns()+'<ul>'+d.layers.map(k=>`<li>${esc(LAYERS[k])}</li>`).join('')+'</ul>';
+  else if(c.type==='tree')work=treeHTML(d.tree,true);
+  else work='<ol style="font-size:19px">'+d.cases.map(t=>`<li style="margin:10px 0">${esc(t)}</li>`).join('')+'</ol>';
+  if(c.type==='mus')window.__set=makeChallenge(c.r,code).set;
+  app.innerHTML=`<div class="card tint"><div style="display:flex;justify-content:space-between;align-items:center"><h2 class="hd">Ronda ${c.r+1}: ${esc(c.title)}${c.mult>1?' · x2':''}</h2><b id="tm" style="font-size:28px"></b></div><p style="font-size:20px;font-weight:700;margin:6px 0">${esc(c.prompt)}</p></div>
+   <div class="grid"><div class="card">${work}${c.type==='mus'&&open?'<button class="btn alt" onclick="playLayers(window.__set)">🔁 Repetir la melodía</button>':''}</div><div class="card"><div id="d"></div></div></div>
+   <div style="text-align:center" id="ctl"></div>`;
+}
+function chip(id,ev,c){const e=ev[id];if(id==='casa')return '<span class="chip">🏠</span>';
+  if(!e)return '';if(e.ok){const s=e.t&&c.startedAt?((e.t-c.startedAt)/1000).toFixed(1)+' s':'';return `<span class="chip ok">✅ ${s}</span>`;}
+  return `<span class="chip">${e.n?'❌ '+e.n+' intento(s)':'…pensando'}</span>`;}
+function dyn(key){
+  const d=$('#d');if(!d)return;
+  if(key==='lobby'){d.innerHTML=pids().map(p=>`<div class="chip" style="margin:3px;display:inline-block">${esc(S.pairs[p].name)} <small>(${esc(S.pairs[p].m1||'')}, ${esc(S.pairs[p].m2||'')})</small></div>`).join('')||'<i>Esperando parejas…</i>';$('#go').disabled=pids().length<1;return;}
+  if(key==='end'){d.innerHTML=rankList(S.pairs,S.scores);return;}
+  const c=S.cur,open=key.endsWith('o'),ev=evalAll(),res=S.res?.[c.r]||{};
+  const rows=Object.values(c.duels||{}).map(x=>{
+    const side=id=>`<td style="width:38%"><b>${esc(nm(id))}</b> ${open?chip(id,ev,c):(res[id]?.ok?'<span class="chip ok">✅</span>':'<span class="chip">❌</span>')+' <b>+'+(res[id]?.pts||0)+'</b>'+(res[id]?.w?' 🏆':'')}</td>`;
+    return `<tr>${side(x.a)}<td style="text-align:center">⚔️</td>${side(x.b)}</tr>`;}).join('');
+  d.innerHTML=`<h3 class="hd">Duelos</h3><table>${rows}</table>`+(open?'':`<h3 class="hd" style="margin-top:12px">Respuesta</h3><p>${esc(c.sol||'')}</p><h3 class="hd">Ranking</h3>${rankList(S.pairs,S.scores)}`);
+  $('#ctl').innerHTML=open?'<button class="btn alt" onclick="H.close()">Cerrar ronda ya</button>':`<button class="btn" onclick="H.next()">${c.r+1<ROUNDS.length?'Siguiente ronda →':'Ver podio 🏆'}</button>`;
+}
+setInterval(()=>{const c=S.cur,t=$('#tm');if(!t||!c||!c.open)return;
+  const el=(Date.now()-(typeof c.startedAt==='number'?c.startedAt:t0))/1000,r=Math.max(0,Math.ceil(c.dur-el));t.textContent='⏱ '+r+' s';t.style.color=r<=10?'#C4173F':'';if(r<=0)closeRound();},500);
+(async()=>{
+  if(code){const h=await db.get(base()+'/hostUid');if(h===me){subscribe();return;}code='';}
+  build('setup');
+})();
+</script></body></html>
