@@ -127,7 +127,7 @@ setInterval(()=>{
 
 // ---------- vistas ----------
 const T3=['img','mem','det'];
-function joinUrl(){return location.href.replace(/duelo-host\.html.*$/,'duelo.html')+'?sala='+code;}
+function joinUrl(){const dir=location.pathname.replace(/[^/]*$/,'');return location.origin+dir+'duelo.html?sala='+code;}
 function render(){
   if(!code){lastKey='none';app.innerHTML=`<div class="card center"><div style="font-size:64px">⚔️</div><h2 class="hd">Duelo de patrones</h2><p style="color:var(--mute)">Equipos de hasta 5 estudiantes, un celular por equipo.</p><button class="btn go" id="mk">Crear sala nueva</button></div>`;$('#mk').onclick=createRoom;return;}
   if(S.state==null){app.innerHTML='<div class="card center"><div class="dots"><span></span><span></span><span></span></div><p>Conectando…</p></div>';return;}
