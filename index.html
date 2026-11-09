@@ -1,0 +1,308 @@
+<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Duelo de patrones · Profe</title>
+<link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@700;800&family=Open+Sans:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="duelo.css"><script src="firebase-config.js"></script>
+<style>
+.wrap{max-width:1180px}
+.lobby{display:grid;grid-template-columns:1fr 1.2fr;gap:18px}@media(max-width:800px){.lobby{grid-template-columns:1fr}}
+.teams{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:10px}
+.team{display:flex;gap:10px;align-items:center;background:#fff;border-radius:16px;padding:10px 12px;box-shadow:0 3px 0 #e6dcef;animation:pop .35s both}
+.team small{display:block;color:var(--mute);font-size:12px;line-height:1.2}
+.cmd{display:flex;gap:10px;flex-wrap:wrap;justify-content:center;margin-top:14px}
+.tchip{display:inline-flex;gap:6px;align-items:center;background:#fff;border-radius:999px;padding:4px 12px 4px 4px;font-weight:700;box-shadow:0 2px 0 #e6dcef;margin:3px}
+.tchip button{border:0;background:#FCE0E6;border-radius:50%;width:22px;height:22px;cursor:pointer;font-weight:800;color:#C4173F}
+.typesel{display:flex;gap:8px;flex-wrap:wrap;justify-content:center;margin:8px 0}
+.pbig{font:800 22px Montserrat,Arial;text-align:center;margin:6px 0}
+.mcard .ring{transform:scale(.8);transform-origin:right center}
+.stage .ring{transform:scale(1.4);transform-origin:right center}
+.tiew{background:#FFF4CC;border-radius:12px;padding:8px 12px;font-weight:700;margin:6px 0;text-align:center}
+.byec{background:#F5ECFB;border-radius:18px;padding:12px;text-align:center;font-weight:800;animation:pop .4s both}
+.pill.big{font-size:16px}
+.lock{max-width:420px;margin:40px auto}
+</style></head>
+<body><div class="bar"></div>
+<div class="hero"><div class="in"><div class="logo">🎤</div><div><h1>Duelo de patrones · Profe</h1><p>Torneo por eliminación · pantalla para proyectar</p></div></div></div>
+<div class="wrap" id="app"></div>
+<script type="module">
+import {initDb} from './db.js';
+import {TY,POOL,POOLBY,makeChallenge,pubOf,evalSide,decide,publicHTML,esc,avatar,ring,setRing,confetti,podiumHTML,shuffle} from './shared.js';
+const $=s=>document.querySelector(s),app=$('#app');
+const shuf=a=>shuffle(Math.random,a);
+
+// ---------- contraseña (solo la huella SHA-256, nunca el texto) ----------
+const HASH='83128a052969a6433c13480284439f450524e45acbffcc1166b2d4894d4cf451';
+const sha=async s=>[...new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(s)))].map(x=>x.toString(16).padStart(2,'0')).join('');
+async function gate(){
+  if(sessionStorage.getItem('duelo_ok')===HASH)return;
+  await new Promise(res=>{
+    app.innerHTML=`<div class="card center lock"><div style="font-size:54px">🔒</div><h2 class="hd">Vista de la profe</h2><p style="color:var(--mute)">Escribe la contraseña para entrar.</p>
+    <input class="t" id="pw" type="password" autocomplete="off" placeholder="Contraseña" style="text-align:center;font-size:20px"><div class="msg bad" id="pe"></div><button class="btn go wide" id="pg">Entrar</button></div>`;
+    const go=async()=>{if(await sha($('#pw').value)===HASH){sessionStorage.setItem('duelo_ok',HASH);res();}else{$('#pe').textContent='Contraseña incorrecta.';$('#pw').value='';}};
+    $('#pg').onclick=go;$('#pw').onkeydown=e=>{if(e.key==='Enter')go();};$('#pw').focus();
+  });
+}
+await gate();
+
+const db=await initDb(),me=db.uid;
+let code=localStorage.getItem('duelo_host_code')||'';
+const S={state:null,pairs:{},cur:null,scores:{},answers:{}};
+let subbed=false,R=null,lastKey=null,M={round:0,used:[],semis:[]},RT='mix',D=[],Dkey='';
+const base=()=>'rooms/'+code,mk=()=>'duelo_meta_'+code;
+const loadMeta=()=>{try{M={round:0,used:[],semis:[],...JSON.parse(localStorage.getItem(mk())||'{}')};}catch(e){}};
+const saveMeta=()=>localStorage.setItem(mk(),JSON.stringify(M));
+const pids=()=>Object.keys(S.pairs);
+const nm=id=>S.pairs[id]?.name||'?';
+const isOut=id=>S.scores?.[id]?.st==='out';
+const alive=()=>pids().filter(id=>!isOut(id));
+const nextName=()=>{const n=alive().length;return n<=2?'Gran final':n<=4?'Semifinales':'Ronda '+(M.round+1);};
+
+// ---------- sala ----------
+const rndCode=()=>{const a='BCDFGHJKLMNPRSTVXZ';let s='';for(let i=0;i<4;i++)s+=a[Math.floor(Math.random()*a.length)];return s;};
+async function createRoom(){
+  let c;do{c=rndCode();}while(await db.get('rooms/'+c+'/state')!=null);
+  code=c;localStorage.setItem('duelo_host_code',code);M={round:0,used:[],semis:[]};saveMeta();
+  await db.set(base(),{hostUid:me,state:'lobby',created:db.ts()});subscribe();
+}
+function subscribe(){
+  if(subbed)return;subbed=true;loadMeta();
+  const w=(k,f)=>db.on(base()+'/'+k,v=>{f(v);resume();render();});
+  w('state',v=>S.state=v);w('pairs',v=>S.pairs=v||{});w('cur',v=>S.cur=v);w('scores',v=>S.scores=v||{});
+  db.on(base()+'/answers',v=>{S.answers=v||{};judge();render();});
+}
+function resume(){ // si la profe recarga a mitad de una ronda
+  const c=S.cur;if(R||S.state!=='play'||!c?.matches)return;
+  R={key:c.key,name:c.name,final:!!c.final,a:c.a,b:c.b,wa:c.series?.wa||0,wb:c.series?.wb||0,seq:100,game:(c.series?.wa||0)+(c.series?.wb||0),m:{},types:shuf(Object.keys(TY))};
+  Object.entries(c.matches).forEach(([mid,m])=>{
+    if(m.bye){R.m[mid]={mid,a:m.a,bye:true,w:m.a};return;}
+    R.m[mid]={mid,a:m.a,b:m.b,ch:makeChallenge(POOLBY[m.ch.id],code),phase:m.ch.phase||'ask',ends:m.endsAt||Date.now(),w:m.w,why:m.why};});
+}
+
+// ---------- retos ----------
+function pickDef(ty){
+  const used=new Set(M.used);let c=POOL.filter(d=>d.ty===ty&&!used.has(d.id));
+  if(!c.length)c=POOL.filter(d=>!used.has(d.id));
+  if(!c.length){M.used=[];c=POOL.filter(d=>d.ty===ty);}
+  const d=c[Math.floor(Math.random()*c.length)];M.used.push(d.id);saveMeta();return d;
+}
+const tot=x=>x.phase==='show'?x.ch.showSec:x.ch.dur;
+function newMatch(a,b,ty){
+  const ch=makeChallenge(pickDef(ty),code),phase=ch.ty==='mem'?'show':'ask';
+  return{mid:'m'+(R.seq++),a,b,ch,phase,ends:Date.now()+(phase==='show'?ch.showSec:ch.dur)*1000};
+}
+function pubMatch(x){
+  if(x.bye)return{a:x.a,bye:true,w:x.w};
+  const ch=pubOf(x.ch);if(x.ch.ty==='mem')ch.phase=x.phase;else delete ch.phase;
+  const o={a:x.a,b:x.b,ch,endsAt:x.ends};if(x.w){o.w=x.w;o.why=x.why||'score';}return o;
+}
+function curObj(){
+  const o={key:R.key,name:R.name,matches:{}};
+  if(R.final){o.final=true;o.a=R.a;o.b=R.b;o.series={wa:R.wa,wb:R.wb};}
+  Object.values(R.m).forEach(x=>o.matches[x.mid]=pubMatch(x));return o;
+}
+
+// ---------- armar y lanzar ----------
+async function startBracket(){
+  const sc={};pids().forEach(id=>sc[id]={st:'in'});
+  M={round:0,used:[],semis:[]};saveMeta();
+  await db.set(base()+'/scores',sc);await db.set(base()+'/state','bracket');
+}
+function autoPair(){const ids=shuf(alive()),r=[];for(let i=0;i<ids.length;i+=2)r.push({a:ids[i],b:ids[i+1]||''});return r;}
+function validate(){
+  const al=alive(),cnt={};D.forEach(p=>{[p.a,p.b].forEach(x=>{if(x)cnt[x]=(cnt[x]||0)+1;});});
+  if(D.some(p=>!p.a))return 'Falta elegir un equipo en algún duelo.';
+  if(al.some(id=>cnt[id]!==1))return 'Cada equipo debe aparecer exactamente una vez (revisa los marcados en rojo).';
+  if(!D.some(p=>p.b))return 'Debe haber al menos un duelo con dos equipos.';return '';
+}
+async function startRound(){
+  const name=nextName();M.round++;saveMeta();
+  const types=RT==='mix'?shuf(Object.keys(TY)):[RT];
+  R={key:'r'+M.round,name,final:false,seq:0,m:{},game:0,types:shuf(Object.keys(TY)),wa:0,wb:0};
+  D.forEach((p,i)=>{if(!p.b){const mid='b'+i;R.m[mid]={mid,a:p.a,bye:true,w:p.a};}else{const x=newMatch(p.a,p.b,types[i%types.length]);R.m[x.mid]=x;}});
+  lastKey=null;await db.set(base()+'/cur',curObj());await db.set(base()+'/state','play');
+}
+async function startFinal(){
+  const ids=alive();M.round++;saveMeta();
+  R={key:'F',name:'Gran final',final:true,a:ids[0],b:ids[1],wa:0,wb:0,seq:0,game:0,m:{},types:shuf(Object.keys(TY))};
+  await nextGame(true);
+}
+async function nextGame(first){
+  R.m={};const x=newMatch(R.a,R.b,R.types[R.game%R.types.length]);R.m[x.mid]=x;R.game++;lastKey=null;
+  await db.set(base()+'/cur',curObj());if(first)await db.set(base()+'/state','play');
+}
+
+// ---------- juzgar ----------
+const attempts=(x,pid)=>{const a=S.answers?.[R.key+x.mid]?.[pid];return a?Object.values(a):[];};
+const live=(x,pid)=>evalSide(x.ch,attempts(x,pid));
+async function settle(x,wid,why){
+  if(x.w||x.settling)return;x.settling=1;x.w=wid;x.why=why;delete x.tie;
+  const lose=wid===x.a?x.b:x.a;
+  if(R.final){
+    if(why==='elim'){if(wid===R.a)R.wa=Math.max(R.wa,2);else R.wb=Math.max(R.wb,2);}
+    else{if(wid===R.a)R.wa++;else R.wb++;}
+    await db.set(base()+'/cur/series',{wa:R.wa,wb:R.wb});
+  }
+  if(why==='elim')await db.set(base()+'/scores/'+lose,{st:'out',r:R.name});
+  await db.set(base()+'/cur/matches/'+x.mid,pubMatch(x));
+  if(R.wa>=2||R.wb>=2)confetti(40);
+  render();
+}
+async function judge(timeUp){
+  if(!R||S.state!=='play')return;
+  for(const x of Object.values(R.m)){
+    if(x.w||x.bye||x.phase==='show')continue;
+    const A=live(x,x.a),B=live(x,x.b),w=decide(x.ch,A,B,!!timeUp||x.ends<=Date.now());
+    if(w)await settle(x,w==='a'?x.a:x.b,'score');
+  }
+}
+async function toAsk(x){if(x.phase!=='show')return;x.phase='ask';x.ends=Date.now()+x.ch.dur*1000;await db.set(base()+'/cur/matches/'+x.mid,pubMatch(x));render();}
+async function redo(x){
+  const old=x.mid,ty=shuf(Object.keys(TY))[0];delete R.m[old];
+  const nx=newMatch(x.a,x.b,ty);R.m[nx.mid]=nx;
+  await db.set(base()+'/cur/matches/'+old,null);await db.set(base()+'/cur/matches/'+nx.mid,pubMatch(nx));lastKey=null;render();
+}
+async function advance(){
+  const losers=[];Object.values(R.m).forEach(x=>{if(!x.bye)losers.push(x.w===x.a?x.b:x.a);});
+  await Promise.all(losers.map(l=>db.set(base()+'/scores/'+l,{st:'out',r:R.name})));
+  if(R.name==='Semifinales'){M.semis=losers;saveMeta();}
+  const left=alive().filter(id=>!losers.includes(id));
+  if(left.length<=1)return crown(left[0],null);
+  R=null;lastKey=null;await db.set(base()+'/state','bracket');
+}
+async function crown(champ,second){
+  const c={key:'end',champion:champ||''};if(second)c.second=second;if(M.semis?.length)c.semis=M.semis;
+  await db.set(base()+'/cur',c);await db.set(base()+'/state','end');R=null;lastKey=null;
+}
+async function eliminateTeam(id){await db.set(base()+'/scores/'+id,{st:'out',r:'Descalificado'});D=[];Dkey='';}
+
+// ---------- reloj ----------
+setInterval(()=>{
+  if(!R||S.state!=='play')return;
+  for(const x of Object.values(R.m)){
+    if(x.bye||x.w)continue;const rem=(x.ends-Date.now())/1000;setRing('rg_'+x.mid,rem,tot(x));
+    if(rem<=0){
+      if(x.phase==='show')toAsk(x);
+      else if(!x.tu){x.tu=1;judge(true).then(()=>{if(!x.w&&!x.tie){x.tie=true;lastKey=null;render();}});}
+    }
+  }
+},250);
+
+// ---------- vistas ----------
+function joinUrl(){const dir=location.pathname.replace(/[^/]*$/,'');return location.origin+dir+'duelo.html?sala='+code;}
+const chips=()=>`<div class="chips">${pids().map(id=>`<span class="tchip ${isOut(id)?'out':''}">${avatar(id,nm(id),26)}${esc(nm(id))}</span>`).join('')}</div>`;
+function render(){
+  if(!code){if(lastKey!=='none'){lastKey='none';start();}return;}
+  if(S.state==null){app.innerHTML='<div class="card center"><div class="dots"><span></span><span></span><span></span></div><p>Conectando…</p></div>';lastKey='conn';return;}
+  const st=S.state;let key=st;
+  if(st==='lobby')key='lobby'+pids().length;
+  else if(st==='bracket')key='bracket'+alive().join(',')+JSON.stringify(D)+RT+Object.keys(S.scores).length;
+  else if(st==='play'){if(!R)return;key='play'+R.key+Object.values(R.m).map(x=>x.mid+(x.w||'')+x.phase+(x.tie?'t':'')).join('|')+R.wa+R.wb;}
+  if(key===lastKey)return st==='play'?updateLive():undefined;
+  lastKey=key;
+  if(st==='lobby')lobby();else if(st==='bracket')bracket();else if(st==='play')play();else if(st==='end')finale();
+}
+function start(){
+  app.innerHTML=`<div class="card center"><div style="font-size:64px">⚔️</div><h2 class="hd">Torneo de patrones</h2><p style="color:var(--mute)">Equipos de hasta 5 estudiantes se enfrentan de a dos en retos distintos. El que gana sigue, el que pierde sale.</p>
+  <div class="cmd"><button class="btn go" id="nr">Crear sala</button></div></div>`;
+  $('#nr').onclick=async()=>{await createRoom();lastKey=null;render();};
+}
+function newRoomBtn(){return `<button class="btn ghost" id="nrm">Nueva sala</button>`;}
+function bindNew(){const b=$('#nrm');if(b)b.onclick=()=>{if(confirm('¿Cerrar esta sala y crear otra?')){localStorage.removeItem('duelo_host_code');location.reload();}};}
+function lobby(){
+  const url=joinUrl(),ids=pids();
+  app.innerHTML=`<div class="lobby"><div class="card center"><h3 class="hd">Entren con este código</h3><div class="code">${esc(code)}</div>
+   <img alt="QR" width="200" height="200" style="margin:8px auto;display:block;border-radius:12px" src="https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(url)}">
+   <p style="font-size:13px;color:var(--mute);word-break:break-all">${esc(url)}</p></div>
+  <div class="card"><h3 class="hd">Equipos conectados (${ids.length})</h3><div class="teams">${ids.map(id=>`<div class="team">${avatar(id,nm(id),44)}<div><b>${esc(nm(id))}</b><small>${esc(S.pairs[id].ms||'')}</small></div></div>`).join('')||'<p style="color:var(--mute)">Esperando equipos…</p>'}</div>
+  <div class="cmd"><button class="btn go" id="go" ${ids.length>=2?'':'disabled'}>Armar enfrentamientos ▶</button>${newRoomBtn()}</div></div></div>`;
+  $('#go').onclick=startBracket;bindNew();
+}
+function bracket(){
+  const al=alive(),name=nextName();
+  if(al.length<=1){app.innerHTML=`<div class="card center"><h2 class="hd">Solo queda un equipo</h2><div class="cmd"><button class="btn go" id="cr">🏆 Coronar</button></div></div>`;$('#cr').onclick=()=>crown(al[0],null);return;}
+  if(al.length===2){
+    const [a,b]=al;
+    app.innerHTML=`<div class="card center"><h2 class="hd" style="font-size:34px">🏆 GRAN FINAL</h2><div style="display:flex;justify-content:center;align-items:center;gap:20px;flex-wrap:wrap;margin:14px 0">
+      <div>${avatar(a,nm(a),90)}<div class="pbig">${esc(nm(a))}</div></div><div style="font-size:50px">⚡</div><div>${avatar(b,nm(b),90)}<div class="pbig">${esc(nm(b))}</div></div></div>
+      <p style="font-size:18px">Mejor de 3 retos distintos. Se proyecta para todo el salón; ellos responden desde su celular.</p>${chips()}
+      <div class="cmd"><button class="btn go" id="sf">¡Empezar la final!</button></div></div>`;
+    $('#sf').onclick=startFinal;return;
+  }
+  const k=al.join(',');if(Dkey!==k){D=autoPair();Dkey=k;}
+  const cnt={};D.forEach(p=>[p.a,p.b].forEach(x=>{if(x)cnt[x]=(cnt[x]||0)+1;}));
+  const opts=(sel,bye)=>(bye?`<option value="">🎟️ Pasa directo</option>`:'<option value="">— elige —</option>')+al.map(id=>`<option value="${id}" ${sel===id?'selected':''}>${esc(nm(id))}</option>`).join('');
+  const types=[['mix','🎲 Sorpresa (mezcla)'],...Object.entries(TY).map(([k,v])=>[k,v.e+' '+v.n])];
+  app.innerHTML=`<div class="card"><h2 class="hd" style="text-align:center;font-size:30px">${esc(name)}</h2>
+  <p class="center" style="color:var(--mute)">${al.length} equipos siguen en juego. Organiza quién compite con quién.</p>${chips()}</div>
+  <div class="card"><h3 class="hd">Tipo de reto de esta ronda</h3><div class="typesel">${types.map(([k,t])=>`<button class="pbtn ${RT===k?'sel':''}" data-rt="${k}">${t}</button>`).join('')}</div>
+  <p class="center" style="color:var(--mute);font-size:14px">Cada duelo recibe un reto distinto del banco y no se repite nunca en el torneo.</p></div>
+  <div class="card"><h3 class="hd">Duelos</h3>${D.map((p,i)=>`<div class="pair"><select data-i="${i}" data-s="a" class="${p.a&&cnt[p.a]>1?'dup':''}">${opts(p.a,false)}</select><b style="color:#C4173F">⚡</b>
+    <select data-i="${i}" data-s="b" class="${p.b&&cnt[p.b]>1?'dup':''}">${opts(p.b,true)}</select></div>`).join('')}
+  <div class="msg bad" id="ve">${esc(validate()&&D.length?validate():'')}</div>
+  <div class="cmd"><button class="btn ghost" id="rnd">🎲 Sorteo al azar</button><button class="btn go" id="sr">▶ ¡Empezar ${esc(name)}!</button></div></div>
+  <div class="card"><h3 class="hd" style="font-size:16px">Quitar un equipo del torneo (descalificar)</h3><div class="chips">${al.map(id=>`<span class="tchip">${avatar(id,nm(id),26)}${esc(nm(id))}<button data-x="${id}" title="Eliminar">✕</button></span>`).join('')}</div></div>`;
+  app.querySelectorAll('[data-rt]').forEach(b=>b.onclick=()=>{RT=b.dataset.rt;lastKey=null;render();});
+  app.querySelectorAll('select').forEach(s=>s.onchange=()=>{D[+s.dataset.i][s.dataset.s]=s.value;lastKey=null;render();});
+  $('#rnd').onclick=()=>{D=autoPair();lastKey=null;render();};
+  $('#sr').onclick=()=>{const v=validate();if(v){$('#ve').textContent=v;return;}startRound();};
+  app.querySelectorAll('[data-x]').forEach(b=>b.onclick=()=>{if(confirm('¿Descalificar a '+nm(b.dataset.x)+'?'))eliminateTeam(b.dataset.x);});
+}
+function sideHTML(x,pid){
+  const cls=x.w?(x.w===pid?'w':'l'):'';
+  const btns=x.w?(x.w===pid?'<span style="font-size:26px">🏆</span>':(x.why==='elim'?'<span title="Eliminado">🚫</span>':'')):`<div class="acts"><button class="sbtn" data-win="${x.mid}:${pid}" title="Dar la victoria">🏆</button><button class="sbtn x" data-elim="${x.mid}:${pid}" title="Eliminar al equipo (el rival gana)">🚫</button></div>`;
+  return `<div class="side ${cls}">${avatar(pid,nm(pid),48)}<div style="min-width:0"><div class="nm">${esc(nm(pid))}</div><div class="live" data-l="${x.mid}:${pid}">${liveHTML(x,pid)}</div></div>${btns}</div>`;
+}
+function liveHTML(x,pid){
+  if(x.phase==='show')return '<small>👀 memorizando…</small>';
+  const e=live(x,pid);
+  if(x.ch.ty==='tf')return `<div class="pbar"><span style="width:${e.tot?e.n/e.tot*100:0}%"></span></div><small>${e.s} aciertos · ${e.n} de ${e.tot} respondidas</small>`;
+  return `<small>${e.ok?'✅ ¡Acertó!':e.n?'✍️ '+e.n+' intento'+(e.n>1?'s':''):'💭 pensando…'}</small>`;
+}
+function updateLive(){
+  if(!R)return;document.querySelectorAll('[data-l]').forEach(el=>{const [mid,pid]=el.dataset.l.split(':'),x=R.m[mid];if(x&&!x.bye)el.innerHTML=liveHTML(x,pid);});
+}
+function bindActs(){
+  const f=s=>{const [mid,pid]=s.split(':');return[R.m[mid],pid];};
+  app.querySelectorAll('[data-win]').forEach(b=>b.onclick=()=>{const [x,p]=f(b.dataset.win);settle(x,p,'prof');});
+  app.querySelectorAll('[data-elim]').forEach(b=>b.onclick=()=>{const [x,p]=f(b.dataset.elim);if(confirm('¿Eliminar a '+nm(p)+'? Su rival gana este duelo.'))settle(x,p===x.a?x.b:x.a,'elim');});
+  app.querySelectorAll('[data-redo]').forEach(b=>b.onclick=()=>redo(R.m[b.dataset.redo]));
+  app.querySelectorAll('[data-skip]').forEach(b=>b.onclick=()=>toAsk(R.m[b.dataset.skip]));
+}
+function play(){R.final?stage():board();}
+function board(){
+  const xs=Object.values(R.m),real=xs.filter(x=>!x.bye),dn=real.filter(x=>x.w).length,all=dn===real.length;
+  app.innerHTML=`<div class="card"><h2 class="hd" style="text-align:center;font-size:30px">${esc(R.name)} · ${dn} de ${real.length} duelos decididos</h2>${chips()}</div>
+  ${all?`<div class="banner">✅ ¡Ronda completa!</div><div class="cmd" style="margin:0 0 16px"><button class="btn go" id="nx">Siguiente ▶</button></div>`:''}
+  <div class="board">${xs.map(x=>{
+    if(x.bye)return `<div class="mcard byec">${avatar(x.a,nm(x.a),52)}<div>🎟️ ${esc(nm(x.a))} pasa directo</div></div>`;
+    const T=TY[x.ch.ty];
+    return `<div class="mcard ${x.w?'won':''}" style="--c:${T.c}"><div class="mh"><div><span class="pill">${T.e} ${esc(T.n)}</span><div class="tt">${esc(x.ch.t)}</div></div>${x.w?'':ring('rg_'+x.mid)}</div>
+     ${sideHTML(x,x.a)}<div class="vs">⚡ contra ⚡</div>${sideHTML(x,x.b)}
+     ${x.tie?'<div class="tiew">Nadie ganó (empate o nadie acertó). Da la victoria con 🏆 o cambia de reto.</div>':''}
+     ${x.w?'':`<div class="acts" style="justify-content:center;margin-top:8px"><button class="sbtn" data-redo="${x.mid}">🔁 Otro reto</button>${x.phase==='show'?`<button class="sbtn" data-skip="${x.mid}">⏭ Ocultar ya</button>`:''}</div>`}</div>`;}).join('')}</div>`;
+  bindActs();if(all)$('#nx').onclick=advance;updateLive();
+}
+function stage(){
+  const x=Object.values(R.m)[0],T=TY[x.ch.ty],done=R.wa>=2||R.wb>=2,pip=(n)=>[0,1].map(i=>`<span style="opacity:${i<n?1:.2}">⭐</span>`).join('');
+  const prompt=x.phase==='show'||x.ch.ty!=='mem'?x.ch.p:x.ch.ask.p;
+  app.innerHTML=`<div class="stage" style="--c:${T.c}"><div class="series"><div style="text-align:center">${avatar(R.a,nm(R.a),70)}<div class="pbig">${esc(nm(R.a))}</div><div>${pip(R.wa)}</div></div><div>${R.wa} – ${R.wb}</div><div style="text-align:center">${avatar(R.b,nm(R.b),70)}<div class="pbig">${esc(nm(R.b))}</div><div>${pip(R.wb)}</div></div></div>
+   <div class="mh" style="margin-top:14px"><div><span class="pill big">🏆 Gran final · Juego ${R.game}</span><span class="pill big">${T.e} ${esc(T.n)}</span></div>${x.w?'':ring('rg_'+x.mid)}</div>
+   <p class="prompt">${esc(prompt)}</p>${publicHTML(x.ch,x.phase)}
+   ${sideHTML(x,x.a)}${sideHTML(x,x.b)}
+   ${x.tie?'<div class="tiew">Nadie ganó este juego. Da la victoria con 🏆 o cambia de reto.</div>':''}
+   ${x.w?`<div class="banner">${x.why==='elim'?'🚫 Descalificación':'🎉 ¡Punto para '+esc(nm(x.w))+'!'}</div><div class="cmd">${done?`<button class="btn go" id="cr">🏆 Coronar campeón</button>`:`<button class="btn go" id="ng">Siguiente juego ▶</button>`}</div>`
+     :`<div class="acts" style="justify-content:center;margin-top:8px"><button class="sbtn" data-redo="${x.mid}">🔁 Otro reto</button>${x.phase==='show'?`<button class="sbtn" data-skip="${x.mid}">⏭ Ocultar ya</button>`:''}</div>`}</div>`;
+  bindActs();updateLive();
+  const cr=$('#cr');if(cr)cr.onclick=()=>{const ch=R.wa>=2?R.a:R.b,sc=ch===R.a?R.b:R.a,lo=Object.values(S.scores||{});crown(ch,sc);};
+  const ng=$('#ng');if(ng)ng.onclick=()=>nextGame(false);
+}
+function finale(){
+  const c=S.cur||{};
+  app.innerHTML=`<div class="card center"><h2 class="hd" style="font-size:36px">🏆 ¡Tenemos campeón!</h2>${podiumHTML(c.champion,c.second,c.semis||[],S.pairs)}<div class="cmd">${newRoomBtn()}</div></div>`;bindNew();confetti(140);
+}
+
+// ---------- arranque ----------
+(async()=>{
+  if(code){try{const st=await db.get(base()+'/state');if(st!=null)subscribe();else{localStorage.removeItem('duelo_host_code');code='';}}catch(e){localStorage.removeItem('duelo_host_code');code='';}}
+  render();
+})();
+</script></body></html>
