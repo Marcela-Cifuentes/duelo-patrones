@@ -193,6 +193,9 @@ function render(){
   if(!code){if(lastKey!=='none'){lastKey='none';start();}return;}
   if(S.state==null){app.innerHTML='<div class="card center"><div class="dots"><span></span><span></span><span></span></div><p>Conectando…</p></div>';lastKey='conn';return;}
   const st=S.state;let key=st;
+  if(!['lobby','bracket','play','end'].includes(st)||(st==='play'&&!R&&S.cur&&!S.cur.matches)){
+    if(lastKey!=='old'){lastKey='old';app.innerHTML=`<div class="card center"><div style="font-size:54px">🧹</div><h2 class="hd">Esta sala es de la versión anterior</h2><p style="color:var(--mute)">El torneo necesita una sala nueva.</p><div class="cmd"><button class="btn go" id="fresh">Crear sala nueva</button></div></div>`;$('#fresh').onclick=()=>{localStorage.removeItem('duelo_host_code');location.reload();};}
+    return;}
   if(st==='lobby')key='lobby'+pids().length;
   else if(st==='bracket')key='bracket'+alive().join(',')+JSON.stringify(D)+RT+Object.keys(S.scores).length;
   else if(st==='play'){if(!R)return;key='play'+R.key+Object.values(R.m).map(x=>x.mid+(x.w||'')+x.phase+(x.tie?'t':'')).join('|')+R.wa+R.wb;}
