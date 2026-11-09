@@ -1,0 +1,132 @@
+<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Duelo de patrones</title>
+<link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@700;800&family=Open+Sans:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="duelo.css"><script src="firebase-config.js"></script></head>
+<body><div class="bar"></div>
+<div class="hero"><div class="in"><div class="logo">⚔️</div><div><h1>Duelo de patrones</h1><p>Decorator y Composite · ¡equipo contra equipo!</p></div></div></div>
+<div class="wrap" id="app"></div>
+<script type="module">
+import {initDb} from './db.js';
+import {FILTERS,TR,QN,photoHTML,treeHTML,esc,confetti,rankList,avatar,colorOf,ring,setRing,ICON} from './shared.js';
+const $=s=>document.querySelector(s),app=$('#app');
+const db=await initDb(),me=db.uid;
+let code=(new URLSearchParams(location.search).get('sala')||localStorage.getItem('duelo_code')||'').toUpperCase();
+const S={state:null,pairs:{},cur:null,res:{},scores:{}};
+let lastKey=null,t0=0,getAns=()=>null,lastFb='',subbed=false;
+const base=()=>'rooms/'+code;
+const myName=()=>S.pairs[me]?.name||'Tu equipo';
+
+function joinView(err){
+  app.innerHTML=`<div class="card"><h2 class="hd" style="color:var(--p)">Únanse al duelo</h2>
+  <p style="color:var(--mute)">Un solo celular por equipo: el capitán escribe aquí y manda las respuestas que decidan entre todos.</p>
+  <label>Código de sala</label><input class="t" id="c" maxlength="6" value="${esc(code)}" style="text-transform:uppercase;font-weight:800;letter-spacing:4px">
+  <label>Nombre del equipo</label><input class="t" id="n" maxlength="30" placeholder="Ej: Los Decoradores">
+  <label>Integrantes (mínimo 2, máximo 5)</label>
+  ${[1,2,3,4,5].map(i=>`<input class="t m" maxlength="30" placeholder="Integrante ${i}" style="margin-bottom:6px">`).join('')}
+  <div class="msg bad" id="e">${esc(err||'')}</div><button class="btn go wide" id="go">¡Entrar al duelo!</button></div>`;
+  $('#go').onclick=async()=>{
+    const c=$('#c').value.trim().toUpperCase(),n=$('#n').value.trim(),ms=[...document.querySelectorAll('.m')].map(x=>x.value.trim()).filter(Boolean);
+    if(!c||!n||ms.length<2)return $('#e').textContent='Falta el código, el nombre del equipo y al menos 2 integrantes.';
+    code=c;const st=await db.get(base()+'/state');
+    if(st==null)return $('#e').textContent='No encuentro esa sala. Revisen el código.';
+    await db.set(base()+'/pairs/'+me,{name:n,ms:ms.join(' · '),uid:me,at:db.ts()});
+    localStorage.setItem('duelo_code',code);subscribe();
+  };
+}
+function subscribe(){
+  if(subbed)return;subbed=true;
+  const w=(k,f)=>db.on(base()+'/'+k,v=>{f(v);refresh();});
+  w('state',v=>S.state=v);w('pairs',v=>S.pairs=v||{});w('cur',v=>S.cur=v);w('res',v=>S.res=v||{});w('scores',v=>S.scores=v||{});
+}
+const vsBanner=(a,an,b,bn)=>`<div class="vsb"><div class="tm">${avatar(a,an,56)}<span class="n">${esc(an)}</span></div><div class="bolt">⚡</div><div class="tm">${b==='casa'?'<span class="av" style="width:56px;height:56px;font-size:28px;background:#6F6468">🏠</span>':avatar(b,bn,56)}<span class="n">${esc(bn)}</span></div></div>`;
+function myVs(){
+  const c=S.cur,N=id=>id==='casa'?'La casa':(S.pairs[id]?.name||'?');
+  for(const d of Object.values(c?.duels||{})){
+    if(d.a===me)return vsBanner(me,myName(),d.b,N(d.b));
+    if(d.b===me)return vsBanner(me,myName(),d.a,N(d.a));}
+  return `<div class="center"><b>${esc(myName())}</b><br><small>Esta vez no tienen rival. ¡Miren la pantalla!</small></div>`;
+}
+function rivalName(){
+  const c=S.cur;for(const d of Object.values(c?.duels||{})){
+    if(d.a===me)return d.b==='casa'?'La casa 🏠':(S.pairs[d.b]?.name||'?');
+    if(d.b===me)return S.pairs[d.a]?.name||'?';}return '—';
+}
+function refresh(){
+  if(!subbed||S.state==null)return;
+  const c=S.cur,st=S.state;let key;
+  if(st==='end')key='end';
+  else if(c&&c.g&&st==='play')key=c.g+c.q+(c.phase||'')+(c.open?'o':'c');
+  else key='wait';
+  if(key!==lastKey||key==='wait'||key==='end'){lastKey=key;build(key);}else update();
+}
+function build(key){
+  if(key==='wait'){
+    app.innerHTML=`<div class="card center">${avatar(me,myName(),84)}<h2 class="hd" style="margin-top:10px">${esc(myName())}</h2><p style="color:var(--mute)">${esc(S.pairs[me]?.ms||'')}</p>
+    <div class="dots" style="margin:14px 0"><span></span><span></span><span></span></div><p><b>La profe está escogiendo la trivia…</b><br>Sala ${esc(code)} · ${Object.keys(S.pairs).length} equipos conectados</p></div>
+    <div class="card"><h3 class="hd" style="margin-bottom:8px">Marcador</h3>${rankList(S.pairs,S.scores,me)}</div>`;
+  }else if(key==='end'){
+    app.innerHTML=`<div class="card center"><h2 class="hd" style="font-size:30px">🏆 ¡Podio final!</h2><div style="margin-top:10px">${rankList(S.pairs,S.scores,me)}</div></div>`;confetti(100);
+  }else if(key.endsWith('o'))buildRound();
+  else buildResult();
+}
+function phaseDur(){const c=S.cur;return c.phase==='show'?c.showSec:c.dur;}
+function buildRound(){
+  const c=S.cur,d=JSON.parse(c.data||'{}'),T=TR[c.g],show=c.phase==='show';t0=Date.now();lastFb='';
+  app.innerHTML=`<div class="card" style="--c:${T.c}">${myVs()}</div>
+  <div class="card" style="--c:${T.c}"><div class="rhead"><div><span class="pill">${esc(T.n)}</span><span class="pill">Pregunta ${c.q+1} de ${QN}</span>${c.mult>1?'<span class="pill x2">PUNTOS x2</span>':''}</div>${ring('rg')}</div>
+  <p class="prompt">${esc(c.prompt)}</p><div id="work"></div>${show?'':'<div class="msg" id="msg"></div><button class="btn go wide" id="send">Enviar respuesta</button>'}</div>`;
+  B[c.g](d,$('#work'),c);
+  if(!show)$('#send').onclick=send;
+  tick();update();
+}
+const msg=(t,k)=>{const m=$('#msg');if(m){m.textContent=t;m.className='msg '+(k||'');}};
+async function send(){
+  if(!S.cur?.open)return;
+  const a=getAns();if(a==null||a==='')return msg('Les falta completar la respuesta.','bad');
+  const b=$('#send');b.disabled=true;
+  await db.push(base()+'/answers/'+S.cur.g+S.cur.q+'/'+me,{a:String(a),t:db.ts()});
+  msg('Enviado… la profe lo está revisando.');
+  const kk=S.cur.g+S.cur.q;setTimeout(()=>{if(!S.res?.[kk]?.[me]?.ok)b.disabled=false;},1200);
+}
+function update(){
+  const c=S.cur;if(!c||!c.open||c.phase==='show')return;
+  const mine=S.res?.[c.g+c.q]?.[me],fb=mine?(mine.ok?'ok':'no'+mine.n):'';
+  if(fb!==lastFb){lastFb=fb;
+    if(mine?.ok){msg('✅ ¡Correcto! Esperen a que termine la ronda.','good');const b=$('#send');if(b)b.disabled=true;}
+    else if(mine?.n>0){msg('❌ Todavía no es. Revisen y vuelvan a intentar (intentos: '+mine.n+').','bad');const w=$('#work');if(w){w.classList.remove('shake');void w.offsetWidth;w.classList.add('shake');}}}
+}
+function tick(){const c=S.cur;if(!c||!c.open||!$('#rg'))return;const tot=phaseDur(),r=tot-(Date.now()-t0)/1000;setRing('rg',r,tot);}
+setInterval(tick,400);
+const B={
+ img(d,w){
+  let on=[];
+  w.innerHTML=`<div class="split"><div><div class="lab">🎯 Foto objetivo</div>${photoHTML(d.target)}</div><div><div class="lab">🖼️ Su foto</div><div id="ph"></div></div></div><div class="fgrid" id="fg"></div>`;
+  const draw=()=>{$('#ph').innerHTML=photoHTML(on);
+    $('#fg').innerHTML=d.pieces.map(k=>`<button class="fbtn ${on.includes(k)?'on':''}" data-k="${k}"><i style="background:${FILTERS[k].sw}"></i>${esc(FILTERS[k].n)}<em>${on.indexOf(k)+1}</em></button>`).join('');
+    w.querySelectorAll('.fbtn').forEach(b=>b.onclick=()=>{const k=b.dataset.k;on=on.includes(k)?on.filter(x=>x!==k):[...on,k];draw();});};
+  draw();getAns=()=>on.length?on.slice().sort().join(','):null;
+ },
+ mem(d,w,c){
+  if(c.phase==='show'){w.innerHTML=treeHTML(d.tree,true);return;}
+  w.innerHTML=`<div class="hide"><div class="ic">🙈</div><b>Las carpetas ya se escondieron</b></div><label style="display:block;margin-top:12px"><b>Su respuesta (solo el número):</b></label><input class="t" id="num" type="number" inputmode="numeric" placeholder="Escriban un número" style="font-size:24px;text-align:center;font-weight:800">`;
+  getAns=()=>{const v=$('#num').value.trim();return v===''?null:String(Number(v));};
+ },
+ det(d,w){
+  const a=d.cases.map(()=>null),L=[['D','Decorator'],['C','Composite'],['N','Ninguno']];
+  w.innerHTML=d.cases.map((x,i)=>`<div class="case"><div class="em">${x.e}</div><div><b>${i+1})</b> ${esc(x.t)}</div><div class="dbs">${L.map(([k,n])=>`<button class="dbtn" data-i="${i}" data-k="${k}">${n}</button>`).join('')}</div></div>`).join('');
+  w.querySelectorAll('.dbtn').forEach(b=>b.onclick=()=>{const i=+b.dataset.i;a[i]=b.dataset.k;w.querySelectorAll(`[data-i="${i}"]`).forEach(x=>x.classList.toggle('on',x===b));});
+  getAns=()=>a.every(Boolean)?a.join(''):null;
+ }};
+function buildResult(){
+  const c=S.cur,m=S.res?.[c.g+c.q]?.[me]||{},pts=m.pts||0;
+  const head=m.w?'🏆 ¡Ganaron el duelo!':m.ok?'👏 Acertaron, pero el otro equipo fue más rápido':'😅 Esta vez no sumaron';
+  app.innerHTML=`<div class="card center" style="--c:${m.w?'#3F7414':m.ok?'#D9730D':'#6F6468'}"><h2 class="hd">${head}</h2><div class="ptspop">+${pts}</div><p>Duelo contra <b>${esc(rivalName())}</b></p></div>
+  <div class="card"><h3 class="hd">✔ Respuesta correcta</h3><p style="font-size:17px">${esc(c.sol||'')}</p></div><div class="card"><h3 class="hd" style="margin-bottom:8px">Marcador</h3>${rankList(S.pairs,S.scores,me)}</div>`;
+  if(m.w)confetti();
+}
+(async()=>{
+  if(code){const mine=await db.get(base()+'/pairs/'+me),st=await db.get(base()+'/state');
+    if(mine&&st!=null){subscribe();return;}}
+  joinView();
+})();
+</script></body></html>
